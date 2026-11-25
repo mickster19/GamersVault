@@ -1,0 +1,8 @@
+<resources>
+    <style name="Theme.GamersVault" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#FF1E42</item>
+        <item name="colorPrimaryVariant">#C60024</item>
+        <item name="colorSecondary">#0088FF</item>
+        <item name="android:statusBarColor">#090B10</item>
+    </style>
+</resources>
