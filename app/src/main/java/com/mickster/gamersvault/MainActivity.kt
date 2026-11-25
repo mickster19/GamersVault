@@ -1,5 +1,7 @@
 package com.mickster.gamersvault
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -10,7 +12,9 @@ import android.view.Gravity
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -18,39 +22,62 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
-data class VaultItem(val title: String, val price: String, val desc: String)
+data class VaultEntry(
+    val id: String,
+    val title: String,
+    val priceText: String,
+    val badge: String,
+    val desc: String,
+    val images: List<String>
+)
 
 class MainActivity : AppCompatActivity() {
 
     private val dbUrl = "https://moby-42aca-default-rtdb.firebaseio.com"
+    private val bitmapCache = ConcurrentHashMap<String, Bitmap>()
+
+    private lateinit var rootLayout: FrameLayout
+    private lateinit var mainColumn: LinearLayout
     private lateinit var bodyContainer: LinearLayout
     private lateinit var navButtons: Map<String, LinearLayout>
-    private var activeTab = "home"
+    private lateinit var viewerOverlay: FrameLayout
+    private lateinit var viewerImage: ImageView
 
-    private val campaigns = mutableListOf<VaultItem>()
-    private val games = mutableListOf<VaultItem>()
-    private val accounts = mutableListOf<VaultItem>()
-    private val mods = mutableListOf<VaultItem>()
+    private var activeTab = "home"
     private var accountsMode = "buy"
     private var signedInUser: String? = null
+
+    private val campaigns = mutableListOf<VaultEntry>()
+    private val games = mutableListOf<VaultEntry>()
+    private val accounts = mutableListOf<VaultEntry>()
+    private val mods = mutableListOf<VaultEntry>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
+        rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.parseColor("#0F111A"))
         }
 
+        mainColumn = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        // Top Header (MICKSTER VAULT)
         val header = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#151824"))
             setPadding(dp(18), dp(14), dp(18), dp(14))
             gravity = Gravity.CENTER_VERTICAL
         }
-        val logoText = TextView(this).apply {
+        val logo = TextView(this).apply {
             val full = "MICKSTER VAULT"
             val sp = SpannableString(full)
             sp.setSpan(ForegroundColorSpan(Color.parseColor("#F3F4F6")), 0, 8, 0)
@@ -58,10 +85,26 @@ class MainActivity : AppCompatActivity() {
             text = sp
             textSize = 20f
             setTypeface(typeface, Typeface.BOLD)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         }
-        header.addView(logoText)
-        root.addView(header)
+        val avatar = TextView(this).apply {
+            text = "M"
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#4A63F0"))
+            }
+            layoutParams = LinearLayout.LayoutParams(dp(38), dp(38))
+            setOnClickListener { switchTab("profile") }
+        }
+        header.addView(logo)
+        header.addView(avatar)
+        mainColumn.addView(header)
 
+        // Scrollable Content
         val scroll = ScrollView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -71,17 +114,18 @@ class MainActivity : AppCompatActivity() {
         }
         bodyContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(0, dp(10), 0, dp(24))
+            setPadding(0, dp(8), 0, dp(24))
         }
         scroll.addView(bodyContainer)
-        root.addView(scroll)
+        mainColumn.addView(scroll)
 
+        // Bottom Navigation
         val bottomNav = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#151824"))
             setPadding(dp(4), dp(8), dp(4), dp(10))
         }
-        val tabs = listOf(
+        val tabItems = listOf(
             "home" to "Home",
             "games" to "Games",
             "accounts" to "Accounts",
@@ -89,9 +133,9 @@ class MainActivity : AppCompatActivity() {
             "chat" to "Chat",
             "profile" to "Profile"
         )
-        val btnMap = mutableMapOf<String, LinearLayout>()
-        tabs.forEach { (key, label) ->
-            val tabBtn = LinearLayout(this).apply {
+        val map = mutableMapOf<String, LinearLayout>()
+        tabItems.forEach { (key, label) ->
+            val item = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 gravity = Gravity.CENTER
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -103,23 +147,71 @@ class MainActivity : AppCompatActivity() {
                 textSize = 11f
                 setTypeface(typeface, Typeface.BOLD)
             }
-            tabBtn.addView(tv)
-            bottomNav.addView(tabBtn)
-            btnMap[key] = tabBtn
+            item.addView(tv)
+            bottomNav.addView(item)
+            map[key] = item
         }
-        navButtons = btnMap
-        root.addView(bottomNav)
+        navButtons = map
+        mainColumn.addView(bottomNav)
+        rootLayout.addView(mainColumn)
 
-        setContentView(root)
+        // Fullscreen Image Lightbox
+        viewerOverlay = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#F206070C"))
+            visibility = View.GONE
+            setOnClickListener { visibility = View.GONE }
+        }
+        viewerImage = ImageView(this).apply {
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            ).apply { setMargins(dp(14), dp(48), dp(14), dp(48)) }
+        }
+        val closeBtn = TextView(this).apply {
+            text = "✕"
+            setTextColor(Color.WHITE)
+            textSize = 18f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.parseColor("#222638"))
+            }
+            layoutParams = FrameLayout.LayoutParams(dp(38), dp(38)).apply {
+                gravity = Gravity.TOP or Gravity.END
+                setMargins(0, dp(16), dp(16), 0)
+            }
+            setOnClickListener { viewerOverlay.visibility = View.GONE }
+        }
+        viewerOverlay.addView(viewerImage)
+        viewerOverlay.addView(closeBtn)
+        rootLayout.addView(viewerOverlay)
+
+        setContentView(rootLayout)
         switchTab("home")
-        fetchAllCatalog()
+        loadCatalog()
+    }
+
+    private fun openImageLightbox(url: String) {
+        if (url.isBlank()) return
+        val cached = bitmapCache[url]
+        if (cached != null) {
+            viewerImage.setImageBitmap(cached)
+            viewerOverlay.visibility = View.VISIBLE
+        } else {
+            loadBitmap(url) { bmp ->
+                viewerImage.setImageBitmap(bmp)
+                viewerOverlay.visibility = View.VISIBLE
+            }
+        }
     }
 
     private fun switchTab(tab: String) {
         activeTab = tab
-        navButtons.forEach { (k, btn) ->
+        navButtons.forEach { (key, btn) ->
             val tv = btn.getChildAt(0) as TextView
-            if (k == tab) {
+            if (key == tab) {
                 tv.setTextColor(Color.parseColor("#4A63F0"))
                 btn.setBackgroundColor(Color.parseColor("#1E2235"))
             } else {
@@ -127,62 +219,57 @@ class MainActivity : AppCompatActivity() {
                 btn.setBackgroundColor(Color.TRANSPARENT)
             }
         }
-        renderActiveTab()
+        renderPage()
     }
 
-    private fun renderActiveTab() {
+    private fun renderPage() {
         bodyContainer.removeAllViews()
         when (activeTab) {
-            "home" -> renderHome()
-            "games" -> renderListPage("GAMES", games, "")
-            "accounts" -> renderAccountsPage()
-            "mods" -> renderListPage("MODS", mods, "")
-            "chat" -> renderChatPage()
-            "profile" -> renderProfilePage()
+            "home" -> {
+                addHSection("VAULT CAMPAIGNS", campaigns, dp(250), dp(165), "#2E3B8B")
+                addHSection("NEW GAMES", games, dp(168), dp(175), "#151824")
+                addHSection("EFOOTBALL ACCOUNTS", accounts, dp(168), dp(175), "#151824")
+                addHSection("PREMIUM MODS", mods, dp(168), dp(175), "#151824")
+            }
+            "games" -> addGridLikeList("GAMES", games)
+            "accounts" -> renderAccounts()
+            "mods" -> addGridLikeList("MODS", mods)
+            "chat" -> renderChat()
+            "profile" -> renderProfile()
         }
     }
 
-    private fun renderHome() {
-        addHorizontalSection("VAULT CAMPAIGNS", campaigns, "#2E3B8B")
-        addHorizontalSection("NEW GAMES", games, "#151824")
-        addHorizontalSection("EFOOTBALL ACCOUNTS", accounts, "#151824")
-        addHorizontalSection("PREMIUM MODS", mods, "#151824")
-    }
-
-    private fun addHorizontalSection(title: String, items: List<VaultItem>, bgHex: String) {
-        bodyContainer.addView(sectionTitle(title))
-        val hScroll = HorizontalScrollView(this).apply {
+    private fun addHSection(title: String, list: List<VaultEntry>, w: Int, h: Int, bgHex: String) {
+        bodyContainer.addView(sectionHeader(title))
+        val hs = HorizontalScrollView(this).apply {
             isHorizontalScrollBarEnabled = false
             setPadding(dp(18), 0, dp(18), dp(8))
             clipToPadding = false
         }
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        if (items.isEmpty()) {
-            row.addView(makeCard("Inapakia...", "Firebase", bgHex, dp(180)))
+        if (list.isEmpty()) {
+            row.addView(buildEntryCard(VaultEntry("0", "Inapakia...", "", "", "Firebase", emptyList()), w, h, bgHex, true))
         } else {
-            items.take(8).forEach { row.addView(makeCard(it.title, it.price, bgHex, dp(180))) }
+            list.take(8).forEach { row.addView(buildEntryCard(it, w, h, bgHex, true)) }
         }
-        hScroll.addView(row)
-        bodyContainer.addView(hScroll)
+        hs.addView(row)
+        bodyContainer.addView(hs)
     }
 
-    private fun renderListPage(title: String, items: List<VaultItem>, subtitleNote: String) {
-        bodyContainer.addView(sectionTitle(title))
-        if (subtitleNote.isNotEmpty()) {
-            bodyContainer.addView(mutedText(subtitleNote))
-        }
-        if (items.isEmpty()) {
-            bodyContainer.addView(mutedText("Hakuna bidhaa kwa sasa."))
+    private fun addGridLikeList(title: String, list: List<VaultEntry>) {
+        bodyContainer.addView(sectionHeader(title))
+        if (list.isEmpty()) {
+            bodyContainer.addView(mutedLabel("Hakuna vitu kwa sasa."))
             return
         }
-        items.forEach {
-            bodyContainer.addView(makeCard(it.title, "${it.price} · ${it.desc}", "#151824", LinearLayout.LayoutParams.MATCH_PARENT))
+        list.forEach {
+            bodyContainer.addView(buildEntryCard(it, LinearLayout.LayoutParams.MATCH_PARENT, dp(195), "#151824", false))
         }
     }
 
-    private fun renderAccountsPage() {
-        bodyContainer.addView(sectionTitle("EFOOTBALL ACCOUNTS"))
-        val modeBar = LinearLayout(this).apply {
+    private fun renderAccounts() {
+        bodyContainer.addView(sectionHeader("EFOOTBALL ACCOUNTS"))
+        val modeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(dp(18), dp(4), dp(18), dp(10))
         }
@@ -196,32 +283,35 @@ class MainActivity : AppCompatActivity() {
                 setTextColor(Color.WHITE)
                 setOnClickListener {
                     accountsMode = m
-                    renderActiveTab()
+                    renderPage()
                 }
             }
-            modeBar.addView(b)
+            modeRow.addView(b)
         }
-        bodyContainer.addView(modeBar)
+        bodyContainer.addView(modeRow)
 
         when (accountsMode) {
             "buy" -> {
-                if (accounts.isEmpty()) bodyContainer.addView(mutedText("Hakuna akaunti za kuuzwa sasa."))
+                if (accounts.isEmpty()) bodyContainer.addView(mutedLabel("Hakuna akaunti za kuuzwa."))
                 accounts.forEach {
-                    bodyContainer.addView(makeCard(it.title, "${it.price} · ${it.desc}", "#151824", LinearLayout.LayoutParams.MATCH_PARENT))
+                    bodyContainer.addView(buildEntryCard(it, LinearLayout.LayoutParams.MATCH_PARENT, dp(195), "#151824", false))
                 }
             }
             "exchange" -> {
-                bodyContainer.addView(mutedText("Ada ya usimamizi wa Exchange ni Tsh 8,000 baada ya pande zote kuridhia."))
-                bodyContainer.addView(makeCard("Ofa za Exchange", "Chagua akaunti au weka ofa yako ya kubadilishana.", "#1E2235", LinearLayout.LayoutParams.MATCH_PARENT))
+                bodyContainer.addView(mutedLabel("Ada ya Exchange: Tsh 8,000 baada ya wote kuridhia."))
+                bodyContainer.addView(buildEntryCard(
+                    VaultEntry("xch1", "Badilishana Akaunti", "Tsh 8,000", "EXCHANGE", "Weka ofa au chagua ofa ya mwenzako.", emptyList()),
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(110), "#1E2235", false
+                ))
             }
             "sell" -> {
-                bodyContainer.addView(mutedText("Mahitaji: Strength 3200+, hakuna deni la coins, haijaunganishwa na Google Play."))
+                bodyContainer.addView(mutedLabel("Strength 3200+ · Hakuna deni la coins · Sio linked na Google Play."))
                 val box = LinearLayout(this).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(dp(18), dp(6), dp(18), dp(12))
+                    setPadding(dp(18), dp(6), dp(18), dp(14))
                 }
-                val input = EditText(this).apply {
-                    hint = "Weka bei unayotaka (mfano 45000)"
+                val priceInput = EditText(this).apply {
+                    hint = "Bei unayotaka (mfano 45000)"
                     setHintTextColor(Color.parseColor("#9CA3AF"))
                     setTextColor(Color.WHITE)
                     setBackgroundColor(Color.parseColor("#1E2235"))
@@ -232,39 +322,48 @@ class MainActivity : AppCompatActivity() {
                     setAllCaps(false)
                     setBackgroundColor(Color.parseColor("#4A63F0"))
                     setTextColor(Color.WHITE)
-                    val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46))
-                    lp.topMargin = dp(10)
-                    layoutParams = lp
+                    layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                        topMargin = dp(10)
+                    }
                     setOnClickListener {
-                        if (input.text.toString().trim().isEmpty()) {
+                        if (priceInput.text.toString().trim().isEmpty()) {
                             Toast.makeText(this@MainActivity, "Weka bei kwanza", Toast.LENGTH_SHORT).show()
                         } else {
-                            Toast.makeText(this@MainActivity, "Ombi limepokelewa kwa ukaguzi", Toast.LENGTH_SHORT).show()
-                            input.setText("")
+                            Toast.makeText(this@MainActivity, "Ombi limetumwa kwa admin", Toast.LENGTH_SHORT).show()
+                            priceInput.setText("")
                         }
                     }
                 }
-                box.addView(input)
+                box.addView(priceInput)
                 box.addView(btn)
                 bodyContainer.addView(box)
             }
         }
     }
 
-    private fun renderChatPage() {
-        bodyContainer.addView(sectionTitle("CHAT (INBOX & VIKUNDI)"))
-        bodyContainer.addView(mutedText("Ujumbe binafsi (DM) na vikundi vya wanachama."))
-        bodyContainer.addView(makeCard("Inbox / DM", "Anza mazungumzo kwa namba ya simu au jina.", "#151824", LinearLayout.LayoutParams.MATCH_PARENT))
-        bodyContainer.addView(makeCard("Vikundi", "Unda au jiunge na group ya wachezaji.", "#151824", LinearLayout.LayoutParams.MATCH_PARENT))
+    private fun renderChat() {
+        bodyContainer.addView(sectionHeader("CHAT"))
+        bodyContainer.addView(mutedLabel("Inbox (DM) na Vikundi vya wachezaji."))
+        bodyContainer.addView(buildEntryCard(
+            VaultEntry("dm", "Inbox / DM", "BINAFSI", "NEW", "Tuma ujumbe binafsi kwa namba ya simu au jina.", emptyList()),
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(105), "#151824", false
+        ))
+        bodyContainer.addView(buildEntryCard(
+            VaultEntry("grp", "Vikundi", "GROUPS", "HOT", "Jiunge au unda group ya wachezaji.", emptyList()),
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(105), "#151824", false
+        ))
     }
 
-    private fun renderProfilePage() {
-        bodyContainer.addView(sectionTitle("PROFILE"))
-        val status = signedInUser ?: "Hajaingia (Guest)"
-        bodyContainer.addView(makeCard("Akaunti: $status", "MICKSTER VAULT · Native Kotlin", "#151824", LinearLayout.LayoutParams.MATCH_PARENT))
+    private fun renderProfile() {
+        bodyContainer.addView(sectionHeader("PROFILE"))
+        val who = signedInUser ?: "Guest"
+        bodyContainer.addView(buildEntryCard(
+            VaultEntry("prof", "Mtumiaji: $who", "MICKSTER VAULT", "VIP", "Native Kotlin Profile", emptyList()),
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(110), "#151824", false
+        ))
         val box = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(8), dp(18), dp(12))
+            setPadding(dp(18), dp(8), dp(18), dp(14))
         }
         val userInput = EditText(this).apply {
             hint = "Username au namba ya simu"
@@ -274,25 +373,20 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(14), dp(12), dp(14), dp(12))
         }
         val btn = Button(this).apply {
-            text = if (signedInUser == null) "Ingia kwenye Akaunti" else "Toka (Logout)"
+            text = if (signedInUser == null) "Ingia" else "Toka"
             setAllCaps(false)
             setBackgroundColor(Color.parseColor("#4A63F0"))
             setTextColor(Color.WHITE)
-            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46))
-            lp.topMargin = dp(10)
-            layoutParams = lp
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(46)).apply {
+                topMargin = dp(10)
+            }
             setOnClickListener {
                 if (signedInUser == null) {
-                    val u = userInput.text.toString().trim()
-                    if (u.isEmpty()) {
-                        Toast.makeText(this@MainActivity, "Weka username kwanza", Toast.LENGTH_SHORT).show()
-                    } else {
-                        signedInUser = u
-                        renderActiveTab()
-                    }
+                    val v = userInput.text.toString().trim()
+                    if (v.isEmpty()) Toast.makeText(this@MainActivity, "Weka username", Toast.LENGTH_SHORT).show()
+                    else { signedInUser = v; renderPage() }
                 } else {
-                    signedInUser = null
-                    renderActiveTab()
+                    signedInUser = null; renderPage()
                 }
             }
         }
@@ -301,100 +395,194 @@ class MainActivity : AppCompatActivity() {
         bodyContainer.addView(box)
     }
 
-    private fun fetchAllCatalog() {
-        thread {
-            val loadedCampaigns = fetchNode("mv_campaigns", "Tsh 0", "Campaign")
-            val loadedGames = fetchNode("mv_games", "FREE", "Game")
-            val loadedAccounts = fetchNode("mv_accounts", "Tsh 0", "Account")
-            val loadedMods = fetchNode("mv_mods", "FREE", "Mod")
-            runOnUiThread {
-                campaigns.clear(); campaigns.addAll(loadedCampaigns)
-                games.clear(); games.addAll(loadedGames)
-                accounts.clear(); accounts.addAll(loadedAccounts)
-                mods.clear(); mods.addAll(loadedMods)
-                if (activeTab == "home" || activeTab == "games" || activeTab == "accounts" || activeTab == "mods") {
-                    renderActiveTab()
+    private fun buildEntryCard(item: VaultEntry, widthPx: Int, heightPx: Int, bgHex: String, isHorizontal: Boolean): View {
+        val frame = FrameLayout(this).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor(bgHex))
+                cornerRadius = dp(18).toFloat()
+                setStroke(dp(1), Color.parseColor("#222638"))
+            }
+            clipToOutline = true
+            layoutParams = if (isHorizontal) {
+                LinearLayout.LayoutParams(widthPx, heightPx).apply { marginEnd = dp(12) }
+            } else {
+                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, heightPx).apply {
+                    setMargins(dp(18), dp(6), dp(18), dp(6))
                 }
+            }
+        }
+
+        val imgUrl = item.images.firstOrNull { it.startsWith("http") || it.startsWith("data:image") }
+        if (imgUrl != null) {
+            val iv = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            }
+            frame.addView(iv)
+            loadBitmap(imgUrl) { bmp -> iv.setImageBitmap(bmp) }
+            iv.setOnClickListener { openImageLightbox(imgUrl) }
+        }
+
+        if (item.badge.isNotEmpty()) {
+            val badgeTv = TextView(this).apply {
+                text = item.badge.uppercase()
+                setTextColor(Color.WHITE)
+                textSize = 9f
+                setTypeface(typeface, Typeface.BOLD)
+                setPadding(dp(8), dp(4), dp(8), dp(4))
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(6).toFloat()
+                    setColor(
+                        when (item.badge.lowercase()) {
+                            "hot", "sold" -> Color.parseColor("#EF4444")
+                            "sale" -> Color.parseColor("#F59E0B")
+                            else -> Color.parseColor("#4A63F0")
+                        }
+                    )
+                }
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    gravity = Gravity.TOP or Gravity.START
+                    setMargins(dp(10), dp(10), 0, 0)
+                }
+            }
+            frame.addView(badgeTv)
+        }
+
+        val foot = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#CC0F111A"))
+            setPadding(dp(12), dp(8), dp(12), dp(10))
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            )
+            setOnClickListener {
+                if (imgUrl != null) openImageLightbox(imgUrl)
+                else Toast.makeText(this@MainActivity, item.title, Toast.LENGTH_SHORT).show()
+            }
+        }
+        val titleTv = TextView(this).apply {
+            text = item.title
+            setTextColor(Color.parseColor("#F3F4F6"))
+            textSize = 13.5f
+            setTypeface(typeface, Typeface.BOLD)
+            maxLines = 1
+        }
+        val priceTv = TextView(this).apply {
+            text = if (item.priceText.isNotEmpty()) item.priceText else item.desc
+            setTextColor(if (item.priceText == "FREE") Color.parseColor("#11B981") else Color.parseColor("#4A63F0"))
+            textSize = 11.5f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(2), 0, 0)
+        }
+        foot.addView(titleTv)
+        foot.addView(priceTv)
+        frame.addView(foot)
+
+        return frame
+    }
+
+    private fun loadBitmap(urlStr: String, onReady: (Bitmap) -> Unit) {
+        bitmapCache[urlStr]?.let {
+            onReady(it)
+            return
+        }
+        thread {
+            try {
+                val bmp = if (urlStr.startsWith("data:image")) {
+                    val b64 = urlStr.substringAfter("base64,", "")
+                    val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                } else {
+                    val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 8000
+                        readTimeout = 8000
+                    }
+                    conn.inputStream.use { BitmapFactory.decodeStream(it) }
+                }
+                if (bmp != null) {
+                    bitmapCache[urlStr] = bmp
+                    runOnUiThread { onReady(bmp) }
+                }
+            } catch (_: Exception) {
             }
         }
     }
 
-    private fun fetchNode(node: String, defaultPrice: String, fallbackDesc: String): List<VaultItem> {
+    private fun loadCatalog() {
+        thread {
+            val cList = parseNode("mv_campaigns", false)
+            val gList = parseNode("mv_games", true)
+            val aList = parseNode("mv_accounts", false)
+            val mList = parseNode("mv_mods", true)
+            runOnUiThread {
+                campaigns.clear(); campaigns.addAll(cList)
+                games.clear(); games.addAll(gList)
+                accounts.clear(); accounts.addAll(aList)
+                mods.clear(); mods.addAll(mList)
+                renderPage()
+            }
+        }
+    }
+
+    private fun parseNode(node: String, defaultFree: Boolean): List<VaultEntry> {
         return try {
             val conn = (URL("$dbUrl/$node.json").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
                 connectTimeout = 8000
                 readTimeout = 8000
             }
-            val json = conn.inputStream.bufferedReader().use { it.readText() }
-            val nameRegex = Regex("\"name\"\\s*:\\s*\"([^\"]+)\"")
-            val titleRegex = Regex("\"title\"\\s*:\\s*\"([^\"]+)\"")
-            val priceRegex = Regex("\"price\"\\s*:\\s*([0-9]+)")
-            val titles = nameRegex.findAll(json).map { it.groupValues[1] }.toList().ifEmpty {
-                titleRegex.findAll(json).map { it.groupValues[1] }.toList()
+            val raw = conn.inputStream.bufferedReader().use { it.readText() }
+            val out = mutableListOf<VaultEntry>()
+            val objRegex = Regex("\\{([^{}]*(?:\\[[^\\[\\]]*\\][^{}]*)*)\\}")
+            objRegex.findAll(raw).forEachIndexed { idx, match ->
+                val block = match.groupValues[1]
+                val title = Regex("\"(?:name|title)\"\\s*:\\s*\"([^\"]+)\"").find(block)?.groupValues?.get(1)
+                if (!title.isNullOrBlank()) {
+                    val isFree = Regex("\"free\"\\s*:\\s*true").containsMatchIn(block) || defaultFree
+                    val priceNum = Regex("\"price\"\\s*:\\s*([0-9]+)").find(block)?.groupValues?.get(1)?.toLongOrNull()
+                    val priceText = when {
+                        isFree && (priceNum == null || priceNum == 0L) -> "FREE"
+                        priceNum != null && priceNum > 0L -> "Tsh ${String.format("%,d", priceNum)}"
+                        else -> ""
+                    }
+                    val badge = Regex("\"badge\"\\s*:\\s*\"([^\"]+)\"").find(block)?.groupValues?.get(1) ?: ""
+                    val desc = Regex("\"desc\"\\s*:\\s*\"([^\"]+)\"").find(block)?.groupValues?.get(1) ?: ""
+                    val imgs = Regex("\"(?:icon|image)\"\\s*:\\s*\"([^\"]+)\"|\"https?://[^\"]+\"")
+                        .findAll(block)
+                        .map { it.groupValues[1].ifBlank { it.value.trim('"') } }
+                        .filter { it.startsWith("http") || it.startsWith("data:image") }
+                        .distinct()
+                        .toList()
+                    out.add(VaultEntry("$node-$idx", title, priceText, badge, desc, imgs))
+                }
             }
-            val prices = priceRegex.findAll(json).map { "Tsh ${it.groupValues[1]}" }.toList()
-            titles.take(12).mapIndexed { i, t ->
-                VaultItem(t, if (i < prices.size) prices[i] else defaultPrice, fallbackDesc)
-            }
+            out
         } catch (_: Exception) {
             emptyList()
         }
     }
 
-    private fun sectionTitle(text: String): TextView = TextView(this).apply {
-        this.text = text
+    private fun sectionHeader(t: String): TextView = TextView(this).apply {
+        text = t
         setTextColor(Color.parseColor("#F3F4F6"))
         textSize = 17f
         setTypeface(typeface, Typeface.BOLD)
         setPadding(dp(18), dp(14), dp(18), dp(8))
     }
 
-    private fun mutedText(text: String): TextView = TextView(this).apply {
-        this.text = text
+    private fun mutedLabel(t: String): TextView = TextView(this).apply {
+        text = t
         setTextColor(Color.parseColor("#9CA3AF"))
-        textSize = 13f
+        textSize = 12.5f
         setPadding(dp(18), dp(4), dp(18), dp(10))
     }
 
-    private fun makeCard(title: String, subtitle: String, bgHex: String, widthPx: Int): View {
-        val card = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            val bg = GradientDrawable().apply {
-                setColor(Color.parseColor(bgHex))
-                cornerRadius = dp(16).toFloat()
-                setStroke(dp(1), Color.parseColor("#222638"))
-            }
-            background = bg
-            setPadding(dp(14), dp(14), dp(14), dp(14))
-            val lp = if (widthPx == LinearLayout.LayoutParams.MATCH_PARENT) {
-                LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-                    setMargins(dp(18), dp(6), dp(18), dp(6))
-                }
-            } else {
-                LinearLayout.LayoutParams(widthPx, dp(115)).apply { marginEnd = dp(12) }
-            }
-            layoutParams = lp
-            gravity = Gravity.BOTTOM
-        }
-        val tView = TextView(this).apply {
-            text = title
-            setTextColor(Color.parseColor("#F3F4F6"))
-            textSize = 14f
-            setTypeface(typeface, Typeface.BOLD)
-            maxLines = 2
-        }
-        val sView = TextView(this).apply {
-            text = subtitle
-            setTextColor(Color.parseColor("#4A63F0"))
-            textSize = 12f
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(6), 0, 0)
-        }
-        card.addView(tView)
-        card.addView(sView)
-        return card
-    }
-
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
 }
